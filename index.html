@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Keypulse — Speed Typing Tester</title>
+  
+  <!-- CDN Links -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <style>
+    canvas#particles {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .smooth-cursor {
+      transition: left 0.08s cubic-bezier(0, 0, 0.2, 1), top 0.08s cubic-bezier(0, 0, 0.2, 1);
+      will-change: left, top;
+    }
+
+    .word-chunk-enter {
+      animation: chunkEnter 0.15s ease-out forwards;
+    }
+
+    @keyframes chunkEnter {
+      from {
+        opacity: 0.3;
+        transform: translateY(4px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-mono flex flex-col justify-center items-center p-4 relative overflow-x-hidden select-none">
+
+  <!-- Background Particle Canvas -->
+  <canvas id="particles"></canvas>
+
+  <div id="root" class="w-full max-w-4xl z-10"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+    const API_BASE = "http://127.0.0.1:8000/api";
+
+    function ParticleBackground() {
+      useEffect(() => {
+        const canvas = document.getElementById('particles');
+        const ctx = canvas.getContext('2d');
+        let animationFrameId;
+        let lastTime = performance.now();
+
+        let width = canvas.width = window.innerWidth;
+        let height = canvas.height = window.innerHeight;
+
+        const handleResize = () => {
+          width = canvas.width = window.innerWidth;
+          height = canvas.height = window.innerHeight;
+        };
+        window.addEventListener('resize', handleResize);
+
+        const particleCount = 35;
+        const particles = Array.from({ length: particleCount }, () => ({
+          x: Math.random() * width,
+          y: Math.random() * height,
+          radius: Math.random() * 1.5 + 0.8,
+          vx: (Math.random() - 0.5) * 15,
+          vy: (Math.random() - 0.5) * 15,
+          phase: Math.random() * Math.PI * 2,
+          amplitude: Math.random() * 8 + 4,
+          alpha: Math.random() * 0.3 + 0.1
+        }));
+
+        const render = (now) => {
+          const dt = Math.min((now - lastTime) / 1000, 0.1);
+          lastTime = now;
+
+          ctx.clearRect(0, 0, width, height);
+
+          particles.forEach(p => {
+            p.phase += dt * 0.5;
+            const driftX = Math.sin(p.phase) * p.amplitude * dt;
+            const driftY = Math.cos(p.phase) * p.amplitude * dt;
+
+            p.x += (p.vx * dt) + driftX;
+            p.y += (p.vy * dt) + driftY;
+
+            if (p.x < -10) p.x = width + 10;
+            if (p.x > width + 10) p.x = -10;
+            if (p.y < -10) p.y = height + 10;
+            if (p.y > height + 10) p.y = -10;
+
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(245, 158, 11, ${p.alpha})`;
+            ctx.fill();
+          });
+
+          animationFrameId = requestAnimationFrame(render);
+        };
+
+        animationFrameId = requestAnimationFrame(render);
+
+        return () => {
+          cancelAnimationFrame(animationFrameId);
+          window.removeEventListener('resize', handleResize);
+        };
+      }, []);
+
+      return null;
+    }
+
+    function WpmTester() {
+      const [mode, setMode] = useState('words'); 
+      const [wordCount, setWordCount] = useState(10);
+      const [timeLimit, setTimeLimit] = useState(30);
+
+      const [wordPool, setWordPool] = useState([]);
+      const [currentChunk, setCurrentChunk] = useState([]);
+      const [chunkIndex, setChunkIndex] = useState(0);
+
+      const [typed, setTyped] = useState('');
+      const [status, setStatus] = useState('idle'); 
+
+      const [timeLeft, setTimeLeft] = useState(30);
+      const [results, setResults] = useState(null);
+      const [loading, setLoading] = useState(false);
+
+      const [cursorPos, setCursorPos] = useState({ left: 0, top: 0, height: 28 });
+
+      const inputRef = useRef(null);
+      const containerRef = useRef(null);
+      const charRefs = useRef([]);
+      const startTimeRef = useRef(null);
+      
+      // Accumulate past completed pages
+      const historyRef = useRef({ prompt: '', typed: '' });
+      const currentChunkRef = useRef([]);
+      const typedRef = useRef('');
+
+      currentChunkRef.current = currentChunk;
+      typedRef.current = typed;
+
+      const maxPageSize = mode === 'time' ? 20 : Math.min(25, wordCount);
+
+      const fetchWords = async () => {
+        setLoading(true);
+        try {
+          const countToFetch = mode === 'time' ? 150 : wordCount;
+          const res = await fetch(`${API_BASE}/words?count=${countToFetch}`);
+          const data = await res.json();
+          
+          setWordPool(data.words);
+          resetTest(data.words);
+        } catch (err) {
+          console.error("Backend request failed, using fallback words.", err);
+          const fallback = ["apple", "breeze", "castle", "drift", "echo", "forest", "glance", "harbor", "insight", "journey", "keystone", "lunar"];
+          setWordPool(fallback);
+          resetTest(fallback);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const resetTest = (pool = wordPool) => {
+        setTyped('');
+        setChunkIndex(0);
+        historyRef.current = { prompt: '', typed: '' };
+        setStatus('idle');
+        startTimeRef.current = null;
+        setResults(null);
+        setTimeLeft(timeLimit);
+        
+        const initialChunkSize = mode === 'time' ? 20 : Math.min(25, wordCount);
+        const initialChunk = pool.slice(0, initialChunkSize);
+        setCurrentChunk(initialChunk);
+
+        if (inputRef.current) inputRef.current.focus();
+      };
+
+      useEffect(() => {
+        fetchWords();
+      }, [mode, wordCount, timeLimit]);
+
+      const updateCursorPosition = useCallback(() => {
+        if (!containerRef.current) return;
+        
+        const targetIndex = typed.length;
+        const charEl = charRefs.current[targetIndex] || charRefs.current[targetIndex - 1];
+        
+        if (charEl && containerRef.current) {
+          const containerRect = containerRef.current.getBoundingClientRect();
+          const charRect = charEl.getBoundingClientRect();
+
+          const isAtEnd = targetIndex >= currentChunk.join(' ').length;
+          const leftOffset = isAtEnd 
+            ? (charRect.right - containerRect.left) 
+            : (charRect.left - containerRect.left);
+
+          setCursorPos({
+            left: Math.max(0, leftOffset),
+            top: charRect.top - containerRect.top,
+            height: charRect.height || 28
+          });
+        }
+      }, [typed, currentChunk]);
+
+      useEffect(() => {
+        requestAnimationFrame(updateCursorPosition);
+      }, [typed, currentChunk, updateCursorPosition]);
+
+      // Timer
+      useEffect(() => {
+        let timer = null;
+        if (status === 'running' && mode === 'time') {
+          timer = setInterval(() => {
+            if (!startTimeRef.current) return;
+            
+            const elapsed = Math.floor((performance.now() - startTimeRef.current) / 1000);
+            const remaining = Math.max(0, timeLimit - elapsed);
+            
+            setTimeLeft(remaining);
+
+            if (remaining <= 0) {
+              clearInterval(timer);
+              finishTest(typedRef.current);
+            }
+          }, 200);
+        }
+        return () => clearInterval(timer);
+      }, [status, mode, timeLimit]);
+
+      const advanceChunk = (latestTypedValue) => {
+        const currentChunkText = currentChunkRef.current.join(' ');
+        
+        // Append current page with space separator
+        historyRef.current = {
+          prompt: historyRef.current.prompt ? `${historyRef.current.prompt} ${currentChunkText}` : currentChunkText,
+          typed: historyRef.current.typed ? `${historyRef.current.typed} ${latestTypedValue}` : latestTypedValue
+        };
+
+        const nextIndex = chunkIndex + 1;
+        const wordsProcessedSoFar = (chunkIndex + 1) * maxPageSize;
+
+        if (mode === 'words' && wordsProcessedSoFar >= wordCount) {
+          finishTest(latestTypedValue);
+          return;
+        }
+
+        const remainingWords = wordCount - wordsProcessedSoFar;
+        const nextChunkSize = mode === 'time' ? 20 : Math.min(25, remainingWords);
+        const nextWords = wordPool.slice(nextIndex * maxPageSize, (nextIndex * maxPageSize) + nextChunkSize);
+
+        setChunkIndex(nextIndex);
+        setCurrentChunk(nextWords.length > 0 ? nextWords : wordPool.slice(0, nextChunkSize));
+        setTyped('');
+      };
+
+      const handleInput = (e) => {
+        const value = e.target.value;
+        const currentTargetText = currentChunk.join(' ');
+
+        if (status === 'idle' && value.length > 0) {
+          setStatus('running');
+          startTimeRef.current = performance.now();
+        }
+
+        if (status === 'completed') return;
+
+        setTyped(value);
+
+        if (value.length >= currentTargetText.length) {
+          advanceChunk(value);
+        }
+      };
+
+      const finishTest = async (finalTypedChunk = typed) => {
+        if (status === 'completed') return;
+        setStatus('completed');
+
+        const now = performance.now();
+        const elapsedSeconds = mode === 'time' 
+          ? timeLimit 
+          : Math.max((now - (startTimeRef.current || now)) / 1000, 0.1);
+
+        const currentChunkText = currentChunkRef.current.join(' ');
+
+        const fullPrompt = historyRef.current.prompt 
+          ? `${historyRef.current.prompt} ${currentChunkText}` 
+          : currentChunkText;
+
+        const fullTyped = historyRef.current.typed 
+          ? `${historyRef.current.typed} ${finalTypedChunk}` 
+          : finalTypedChunk;
+
+        try {
+          const res = await fetch(`${API_BASE}/calculate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: fullPrompt,
+              typed: fullTyped,
+              elapsed_time: elapsedSeconds,
+              mode: mode
+            })
+          });
+          const data = await res.json();
+          setResults(data);
+        } catch (err) {
+          console.error("Calculation request failed", err);
+        }
+      };
+
+      const targetText = currentChunk.join(' ');
+      const wordsCompletedCount = (chunkIndex * maxPageSize) + typed.trim().split(/\s+/).filter(Boolean).length;
+
+      return (
+        <div className="flex flex-col gap-6" onClick={() => inputRef.current && inputRef.current.focus()}>
+          
+          <div className="flex flex-col items-center justify-center mb-2">
+            <h1 className="text-4xl md:text-5xl font-extrabold tracking-wider bg-gradient-to-r from-amber-400 via-orange-400 to-amber-200 bg-clip-text text-transparent">
+              KEYPULSE
+            </h1>
+            <p className="text-xs tracking-widest text-slate-500 uppercase mt-1">Master Your Typing Speed</p>
+          </div>
+
+          <div className="bg-slate-900/80 backdrop-blur-md border border-slate-800/80 p-4 rounded-xl flex flex-wrap justify-between items-center gap-4 text-sm text-slate-400 shadow-xl">
+            <div className="flex gap-4">
+              <button 
+                onClick={() => setMode('time')} 
+                className={`hover:text-amber-400 transition font-semibold ${mode === 'time' ? 'text-amber-400 border-b-2 border-amber-400' : ''}`}>
+                Time
+              </button>
+              <button 
+                onClick={() => setMode('words')} 
+                className={`hover:text-amber-400 transition font-semibold ${mode === 'words' ? 'text-amber-400 border-b-2 border-amber-400' : ''}`}>
+                Words
+              </button>
+            </div>
+
+            <div className="flex gap-3">
+              {mode === 'time' ? (
+                [15, 30, 45, 60].map(t => (
+                  <button 
+                    key={t} 
+                    onClick={() => setTimeLimit(t)} 
+                    className={`hover:text-slate-100 transition ${timeLimit === t ? 'text-amber-400 font-bold' : ''}`}>
+                    {t}s
+                  </button>
+                ))
+              ) : (
+                [10, 25, 50, 100].map(w => (
+                  <button 
+                    key={w} 
+                    onClick={() => setWordCount(w)} 
+                    className={`hover:text-slate-100 transition ${wordCount === w ? 'text-amber-400 font-bold' : ''}`}>
+                    {w}
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+
+          <input 
+            ref={inputRef}
+            type="text"
+            value={typed}
+            onChange={handleInput}
+            disabled={status === 'completed'}
+            className="opacity-0 absolute -z-50"
+            autoFocus
+          />
+
+          {status !== 'completed' && (
+            <div className="text-2xl font-bold text-amber-400 h-8">
+              {mode === 'time' ? `${timeLeft}s` : `${Math.min(wordsCompletedCount, wordCount)} / ${wordCount}`}
+            </div>
+          )}
+
+          {status !== 'completed' ? (
+            <div 
+              ref={containerRef}
+              className="bg-slate-900/60 backdrop-blur-md border border-slate-800/60 p-6 md:p-8 rounded-xl min-h-[160px] leading-relaxed text-xl md:text-2xl break-words relative select-none shadow-2xl">
+              
+              {!loading && targetText.length > 0 && (
+                <div 
+                  className="smooth-cursor absolute w-[2.5px] bg-amber-400 rounded-full shadow-[0_0_8px_#f59e0b]"
+                  style={{
+                    left: `${cursorPos.left}px`,
+                    top: `${cursorPos.top}px`,
+                    height: `${cursorPos.height}px`
+                  }}
+                />
+              )}
+
+              {loading ? (
+                <div className="text-slate-500 animate-pulse">Loading words...</div>
+              ) : (
+                <div className="word-chunk-enter">
+                  {targetText.split('').map((char, index) => {
+                    let color = "text-slate-600";
+                    if (index < typed.length) {
+                      color = typed[index] === char ? "text-slate-100" : "text-rose-500 bg-rose-500/10 rounded";
+                    }
+                    return (
+                      <span 
+                        key={index} 
+                        ref={el => charRefs.current[index] = el}
+                        className={`${color} transition-colors duration-75`}>
+                        {char}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="bg-slate-900/90 backdrop-blur-lg p-8 rounded-xl border border-slate-800 text-center space-y-6 shadow-2xl">
+              <h2 className="text-3xl font-bold text-slate-100">Test Complete!</h2>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="bg-slate-950/80 border border-slate-800 p-4 rounded-xl">
+                  <p className="text-slate-400 text-sm mb-1">WPM</p>
+                  <p className="text-4xl md:text-5xl font-extrabold text-amber-400">{results ? results.wpm : 0}</p>
+                </div>
+                <div className="bg-slate-950/80 border border-slate-800 p-4 rounded-xl">
+                  <p className="text-slate-400 text-sm mb-1">Accuracy</p>
+                  <p className="text-4xl md:text-5xl font-extrabold text-emerald-400">{results ? results.accuracy : 0}%</p>
+                </div>
+                <div className="bg-slate-950/80 border border-slate-800 p-4 rounded-xl">
+                  <p className="text-slate-400 text-sm mb-1">Time</p>
+                  <p className="text-4xl md:text-5xl font-extrabold text-indigo-400">{results ? results.elapsed_time : 0}s</p>
+                </div>
+              </div>
+              <button 
+                onClick={fetchWords}
+                className="bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-8 py-3 rounded-xl transition shadow-lg shadow-amber-500/20 active:scale-95">
+                Try Again
+              </button>
+            </div>
+          )}
+
+          <div className="h-6 flex items-center justify-center">
+            <div className={`text-slate-500 text-sm transition-opacity duration-300 ${status === 'idle' ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+              Click anywhere and start typing to begin
+            </div>
+          </div>
+
+        </div>
+      );
+    }
+
+    function App() {
+      return (
+        <React.Fragment>
+          <ParticleBackground />
+          <WpmTester />
+        </React.Fragment>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
